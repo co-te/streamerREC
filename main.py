@@ -342,7 +342,109 @@ settings: dict = {
     "max_duration":     0,   # 0 = no limit, in minutes
     "webhook_url":      "",
     "auto_stop_stalled": False,
+    "folder_template":  "{platform}/{streamer}/{date}",
+    "filename_template": "{streamer}_{date}_{time}",
 }
+
+_LAYOUT_TOKEN_RE = re.compile(r"\{([a-z_]+)\}")
+_LAYOUT_TOKENS = {"platform", "streamer", "date", "time"}
+_DEFAULT_FOLDER_TEMPLATE = "{platform}/{streamer}/{date}"
+_DEFAULT_FILENAME_TEMPLATE = "{streamer}_{date}_{time}"
+
+
+def _sanitize_layout_component(value: str) -> str:
+    """Make one path/name component filesystem-safe and predictable."""
+    cleaned = re.sub(r"[^\w\-]", "_", str(value or "").strip())
+    return cleaned.strip("_")
+
+
+def _normalize_layout_template(template: str, *, field: str, allow_slash: bool) -> str:
+    if not isinstance(template, str):
+        raise ValueError(f"{field} must be a string")
+    normalized = template.strip()
+    if not normalized:
+        raise ValueError(f"{field} cannot be empty")
+    if allow_slash:
+        normalized = normalized.replace("\\", "/")
+    elif "/" in normalized or "\\" in normalized:
+        raise ValueError(f"{field} cannot contain path separators")
+
+    found = set(_LAYOUT_TOKEN_RE.findall(normalized))
+    unknown = sorted(found - _LAYOUT_TOKENS)
+    if unknown:
+        raise ValueError(f"{field} has unsupported token(s): {', '.join('{'+t+'}' for t in unknown)}")
+
+    stripped = _LAYOUT_TOKEN_RE.sub("", normalized)
+    if "{" in stripped or "}" in stripped:
+        raise ValueError(f"{field} has malformed token syntax")
+    return normalized
+
+
+def _render_layout_template(
+    template: str,
+    context: dict[str, str],
+    *,
+    field: str,
+    allow_slash: bool,
+) -> str:
+    normalized = _normalize_layout_template(template, field=field, allow_slash=allow_slash)
+    rendered = _LAYOUT_TOKEN_RE.sub(lambda m: context[m.group(1)], normalized)
+
+    if allow_slash:
+        parts = []
+        for raw_part in rendered.split("/"):
+            clean_part = _sanitize_layout_component(raw_part)
+            if not clean_part:
+                raise ValueError(f"{field} renders an empty folder segment")
+            parts.append(clean_part)
+        if not parts:
+            raise ValueError(f"{field} renders an empty folder path")
+        return "/".join(parts)
+
+    clean_name = _sanitize_layout_component(rendered)
+    if not clean_name:
+        raise ValueError(f"{field} renders an empty filename")
+    return clean_name
+
+
+def _recording_layout_context(platform_raw: str, username: str, now: datetime) -> dict[str, str]:
+    return {
+        "platform": platform_raw or "Unknown",
+        "streamer": username or "unknown",
+        "date": now.strftime("%Y-%m-%d"),
+        "time": now.strftime("%H-%M-%S"),
+    }
+
+
+def _validate_layout_settings_update(updates: dict) -> None:
+    if "folder_template" in updates:
+        updates["folder_template"] = _normalize_layout_template(
+            updates["folder_template"], field="folder_template", allow_slash=True
+        )
+    if "filename_template" in updates:
+        updates["filename_template"] = _normalize_layout_template(
+            updates["filename_template"], field="filename_template", allow_slash=False
+        )
+
+    folder_template = updates.get("folder_template", settings.get("folder_template", _DEFAULT_FOLDER_TEMPLATE))
+    filename_template = updates.get("filename_template", settings.get("filename_template", _DEFAULT_FILENAME_TEMPLATE))
+    probe_context = {
+        "platform": "Twitch",
+        "streamer": "sample_streamer",
+        "date": "2026-01-02",
+        "time": "03-04-05",
+    }
+    _render_layout_template(folder_template, probe_context, field="folder_template", allow_slash=True)
+    _render_layout_template(filename_template, probe_context, field="filename_template", allow_slash=False)
+
+
+def _resolve_recording_output_layout(platform_raw: str, username: str, now: datetime) -> tuple[Path, str]:
+    context = _recording_layout_context(platform_raw, username, now)
+    folder_template = settings.get("folder_template", _DEFAULT_FOLDER_TEMPLATE)
+    filename_template = settings.get("filename_template", _DEFAULT_FILENAME_TEMPLATE)
+    rel_dir = _render_layout_template(folder_template, context, field="folder_template", allow_slash=True)
+    stem = _render_layout_template(filename_template, context, field="filename_template", allow_slash=False)
+    return RECORDINGS_DIR / Path(rel_dir), stem
 
 # ── Cross-platform process helpers ────────────────────────────────────────────
 
@@ -820,16 +922,24 @@ async def run_recording(rec_id: str):
             return
 
     username     = ch.get("display_name") or ch.get("username") or rec_id
-    safe_plat    = re.sub(r'[^\w\-]', '_', platform_raw)
-    safe_user    = re.sub(r'[^\w\-]', '_', username)
     # Monotonic-safe timestamp: DST fall-back can repeat wall-clock times,
     # which would overwrite earlier recordings.
     now          = datetime.now(timezone.utc)
-    date_str     = now.strftime("%Y-%m-%d")
-    time_str     = now.strftime("%H-%M-%S")
-    rec_dir      = RECORDINGS_DIR / safe_plat / safe_user / date_str
+    try:
+        rec_dir, stem = _resolve_recording_output_layout(platform_raw, username, now)
+    except ValueError as e:
+        rec["status"] = "error"
+        rec["ended_at"] = time.time()
+        rec["error"] = f"Invalid storage template: {e}"
+        logger.warning("Recording %s failed due to invalid storage template: %s", rec_id, e)
+        if ch_id := rec.get("channel_id"):
+            ch_entry = channels.get(ch_id)
+            if ch_entry and ch_entry.get("recording_id") == rec_id:
+                ch_entry["recording_id"] = None
+                ch_entry["is_live"] = False
+        _save_state()
+        return
     rec_dir.mkdir(parents=True, exist_ok=True)
-    stem         = f"{safe_user}_{date_str}_{time_str}"
     output_path  = rec_dir / f"{stem}.%(ext)s"
 
     _no_live_from_start = (
@@ -1550,6 +1660,8 @@ class UpdateSettingsRequest(BaseModel):
     max_duration:     Optional[int]  = None
     webhook_url:      Optional[str]  = None
     auto_stop_stalled: Optional[bool] = None
+    folder_template:  Optional[str]  = None
+    filename_template: Optional[str] = None
 
 class ReorderRequest(BaseModel):
     order: list[str]
@@ -1942,16 +2054,21 @@ async def restore_recording(rec_id: str):
         try:
             ch_id = rec.get("channel_id")
             ch = channels.get(ch_id, {}) if ch_id else {}
-            plat = (ch.get("platform") or rec.get("platform") or "Unknown").lower()
-            safe_plat = re.sub(r'[^\w\-]', '_', plat)
-            user = ch.get("display_name") or ch.get("username") or "unknown"
-            safe_user = re.sub(r'[^\w\-]', '_', user)
-            rec_dir = RECORDINGS_DIR / safe_plat / safe_user
+            platform_raw = ch.get("platform") or rec.get("platform") or "Unknown"
+            user = ch.get("display_name") or ch.get("username") or rec.get("username") or "unknown"
+            ts = rec.get("started_at") or rec.get("created_at") or time.time()
+            if isinstance(ts, (int, float)):
+                when = datetime.fromtimestamp(ts, timezone.utc)
+            else:
+                when = datetime.now(timezone.utc)
+            rec_dir, _ = _resolve_recording_output_layout(platform_raw, user, when)
             rec_dir.mkdir(parents=True, exist_ok=True)
             dest = rec_dir / Path(fp).name
             shutil.move(fp, str(dest))
             rec["filepath"] = str(dest)
             rec["filename"] = dest.name
+        except ValueError as e:
+            raise HTTPException(400, f"Invalid storage template: {e}")
         except Exception as e:
             raise HTTPException(500, f"Failed to restore: {e}")
     rec["status"] = "completed"
@@ -2118,7 +2235,12 @@ async def get_settings():
 
 @app.patch("/api/settings")
 async def update_settings(req: UpdateSettingsRequest):
-    for field, val in req.model_dump(exclude_none=True).items():
+    updates = req.model_dump(exclude_none=True)
+    try:
+        _validate_layout_settings_update(updates)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    for field, val in updates.items():
         settings[field] = val
     _save_state()
     return settings
@@ -2317,6 +2439,7 @@ async def import_config(req: ImportRequest):
         "proxy": str, "extra_args": str, "cookies_file": str,
         "retention_days": int, "max_duration": int,
         "webhook_url": str, "auto_stop_stalled": bool,
+        "folder_template": str, "filename_template": str,
     }
     for k, v in req.settings.items():
         if k in settings:
@@ -2330,6 +2453,13 @@ async def import_config(req: ImportRequest):
                     v = max(0, int(v) if k != "retry_delay" else float(v))
                 except (ValueError, TypeError):
                     v = settings[k]  # keep default
+            if k in ("folder_template", "filename_template"):
+                probe_updates = {k: v}
+                try:
+                    _validate_layout_settings_update(probe_updates)
+                except ValueError as e:
+                    logger.warning("Import: skipping %s (%s)", k, e)
+                    continue
             settings[k] = v
     _save_state()
     return {"ok": True, "imported_channels": imported}

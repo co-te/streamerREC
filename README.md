@@ -83,14 +83,29 @@ Open `http://localhost:8000`. Recordings default to `~/StreamRec/recordings`.
 
 ### Web UI settings
 
-Everything else is configured in the UI: check interval, default quality/format, auto-convert to MP4, retention days, max duration, auto-retry, proxy, cookies, webhooks, and low-power mode. All settings persist in `state.json` inside the recordings directory.
+Everything else is configured in the UI: check interval, default quality/format, auto-convert to MP4, retention days, max duration, auto-retry, proxy, cookies, webhooks, low-power mode, and storage layout templates. All settings persist in `state.json` inside the recordings directory.
+
+Storage layout tokens:
+- `{platform}` (website/platform)
+- `{streamer}` (channel display name / username)
+- `{date}` (`YYYY-MM-DD`)
+- `{time}` (`HH-MM-SS`)
+
+Defaults:
+- Folder template: `{platform}/{streamer}/{date}`
+- Filename template: `{streamer}_{date}_{time}`
+
+Example streamer-only layout:
+- Folder template: `{streamer}`
+- Filename template: `{streamer}_{time}`
 
 ## Recordings layout
 
 ```
 recordings/
-├── Twitch/<channel>/<date>/<name>_<date>_<time>.mp4
-├── Kick/<channel>/<date>/…
+├── <folder-template>/<filename-template>.mp4
+├── Twitch/<channel>/<date>/<name>_<date>_<time>.mp4   # default layout
+├── <streamer>/<streamer>_<time>.mp4                    # example custom layout
 ├── cookies/          uploaded cookies.txt files
 ├── _archived/        archived recordings
 ├── state.json        channels, settings, recording index
