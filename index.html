@@ -283,6 +283,11 @@ select.sel{height:34px;padding:0 26px 0 10px;border-radius:8px;background:var(--
             <div class="srow"><div class="lbl"><b>Max Duration</b><span>Stop recordings after this (0 = unlimited)</span></div><div style="display:flex;gap:6px;align-items:center"><input class="tin" type="number" id="in-maxdur" min="0" max="1440" style="width:70px">min</div></div>
             <div class="srow"><div class="lbl"><b>Auto-Stop Stalled</b><span>Stop when no data arrives for 2 minutes</span></div><div class="sw" id="sw-stall" onclick="tgl(this)"></div></div>
           </div>
+          <h3 style="margin-top:20px">Storage Layout</h3>
+          <div class="sbox">
+            <div class="srow"><div class="lbl"><b>Folder Template</b><span>Subfolders under base recordings dir. Use {platform} {streamer} {date} {time} with "/" separators.</span></div><input class="tin" id="in-folder-template" placeholder="{platform}/{streamer}/{date}" style="width:280px"></div>
+            <div class="srow"><div class="lbl"><b>Filename Template</b><span>Name stem before extension. Use {platform} {streamer} {date} {time}.</span></div><input class="tin" id="in-filename-template" placeholder="{streamer}_{date}_{time}" style="width:280px"></div>
+          </div>
         </div>
         <div class="sgroup" id="pane-network" style="display:none">
           <h3>Connection</h3>
@@ -421,6 +426,7 @@ select.sel{height:34px;padding:0 26px 0 10px;border-radius:8px;background:var(--
 const API='';
 let channels={}, recs={}, settings={}, acc={exists:false,authed:false};
 let pollTimer=null, logCh=null;
+let settingsBindingsReady=false;
 
 /* helpers */
 const $=id=>document.getElementById(id);
@@ -579,6 +585,8 @@ async function loadSettingsUI(){
     $('sw-del').classList.toggle('on',!!settings.delete_original);
     $('in-maxdur').value=settings.max_duration??0;
     $('sw-stall').classList.toggle('on',!!settings.auto_stop_stalled);
+    $('in-folder-template').value=settings.folder_template??'{platform}/{streamer}/{date}';
+    $('in-filename-template').value=settings.filename_template??'{streamer}_{date}_{time}';
     $('in-proxy').value=settings.proxy??'';
     $('in-extra').value=settings.extra_args??'';
     $('sw-retry').classList.toggle('on',settings.auto_retry!==false);
@@ -597,6 +605,7 @@ async function saveSettings(){
       default_quality:$('in-quality').value,default_format:$('in-format').value,
       auto_convert_mp4:$('sw-conv').classList.contains('on'),delete_original:$('sw-del').classList.contains('on'),
       max_duration:+$('in-maxdur').value||0,auto_stop_stalled:$('sw-stall').classList.contains('on'),
+      folder_template:$('in-folder-template').value.trim(),filename_template:$('in-filename-template').value.trim(),
       proxy:$('in-proxy').value.trim(),extra_args:$('in-extra').value.trim(),
       auto_retry:$('sw-retry').classList.contains('on'),max_retries:+$('in-maxretry').value||5,
       retry_delay:+$('in-retrydelay').value||15,webhook_url:$('in-webhook').value.trim(),
@@ -604,6 +613,18 @@ async function saveSettings(){
     })});
     toast('Settings saved');fetchSlots();
   }catch(e){toast(e.message,true)}
+}
+function wireSettingsBindings(){
+  if(settingsBindingsReady)return;
+  settingsBindingsReady=true;
+  const swIds=['sw-pi','sw-autoall','sw-conv','sw-del','sw-stall','sw-retry'];
+  const inIds=[
+    'in-interval','in-retention','in-quality','in-format','in-maxdur',
+    'in-folder-template','in-filename-template','in-proxy','in-extra',
+    'in-maxretry','in-retrydelay','in-webhook','in-cookies'
+  ];
+  swIds.forEach(id=>$(id)?.addEventListener('click',()=>setTimeout(saveSettings,0)));
+  inIds.forEach(id=>$(id)?.addEventListener('change',saveSettings));
 }
 async function fetchDisk(){try{const d=await api('/api/disk');$('diskText').textContent=`${fmtB(d.recordings_bytes)} recordings · ${fmtB(d.free)} free`;$('diskDetail').textContent='Space used by captures on disk'}catch{}}
 async function testHook(){try{await api('/api/settings/test-webhook',{method:'POST'});toast('Test sent')}catch(e){toast(e.message,true)}}
@@ -658,7 +679,7 @@ function startPoll(){if(pollTimer)clearInterval(pollTimer);pollTimer=setInterval
 },5000)}
 
 /* init */
-(async()=>{await Promise.allSettled([fetchChannels(),loadAcc(),fetchSlots()]);startPoll()})();
+(async()=>{wireSettingsBindings();await Promise.allSettled([fetchChannels(),loadAcc(),fetchSlots()]);startPoll()})();
 </script>
 </body>
 </html>
